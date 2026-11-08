@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>正規表現→NFA→DFA変換ビジュアライザー</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { background: #0f1117; }
+  .state-circle { transition: fill 0.2s; }
+  .state-active { animation: pulse 0.5s; }
+  @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:0.4 } }
+  svg text { font-family: monospace; }
+</style>
+</head>
+<body class="min-h-screen text-white p-4">
+<div class="max-w-5xl mx-auto">
+  <h1 class="text-2xl font-bold mb-1 text-cyan-300">正規表現 → NFA → DFA 変換ビジュアライザー</h1>
+  <p class="text-gray-400 text-sm mb-4">Thompson構成法でNFAを構築し、べき集合構成でDFAに変換</p>
+
+  <div class="bg-gray-800 rounded-lg p-3 mb-4">
+    <div class="flex gap-2 mb-2">
+      <input type="text" id="regexInput" value="a(b|c)*"
+        class="flex-1 bg-gray-900 text-green-300 font-mono px-3 py-2 rounded border border-gray-600 focus:border-cyan-400 focus:outline-none"
+        aria-label="正規表現入力" placeholder="例: ab, a|b, a*, (ab)+" spellcheck="false">
+      <button id="btnBuild" class="bg-cyan-600 hover:bg-cyan-500 px-4 py-2 rounded font-semibold text-sm transition" aria-label="NFA構築">NFA構築</button>
+      <button id="btnDFA" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded font-semibold text-sm transition" aria-label="DFA変換">DFA変換</button>
+    </div>
+    <div class="flex gap-2">
+      <input type="text" id="testInput"
+        class="flex-1 bg-gray-900 text-yellow-300 font-mono px-3 py-2 rounded border border-gray-600 focus:border-yellow-400 focus:outline-none"
+        aria-label="テスト文字列" placeholder="テスト文字列を入力してEnter">
+      <button id="btnTest" class="bg-yellow-600 hover:bg-yellow-500 px-4 py-2 rounded font-semibold text-sm transition" aria-label="テスト実行">テスト</button>
+    </div>
+    <div class="flex flex-wrap gap-2 mt-2">
+      <span class="text-xs text-gray-500">例:</span>
+      <button class="ex-btn text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded font-mono transition" data-regex="ab" aria-label="ab">ab</button>
+      <button class="ex-btn text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded font-mono transition" data-regex="a|b" aria-label="a|b">a|b</button>
+      <button class="ex-btn text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded font-mono transition" data-regex="a*" aria-label="a*">a*</button>
+      <button class="ex-btn text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded font-mono transition" data-regex="(ab)+" aria-label="(ab)+">(ab)+</button>
+      <button class="ex-btn text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded font-mono transition" data-regex="a(b|c)*" aria-label="a(b|c)*">a(b|c)*</button>
+      <button class="ex-btn text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded font-mono transition" data-regex="(a|b)*abb" aria-label="(a|b)*abb">(a|b)*abb</button>
+    </div>
+  </div>
+
+  <div id="testResult" class="mb-3 h-8"></div>
+
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+    <div class="bg-gray-900 rounded-xl border border-gray-700 p-3">
+      <div class="text-sm font-semibold text-cyan-300 mb-2">NFA (Thompson構成法)</div>
+      <svg id="nfaSvg" width="100%" height="300" aria-label="NFA状態遷移図"></svg>
+      <div id="nfaInfo" class="text-xs text-gray-400 mt-2"></div>
+    </div>
+    <div class="bg-gray-900 rounded-xl border border-gray-700 p-3">
+      <div class="text-sm font-semibold text-blue-300 mb-2">DFA (べき集合構成)</div>
+      <svg id="dfaSvg" width="100%" height="300" aria-label="DFA状態遷移図"></svg>
+      <div id="dfaInfo" class="text-xs text-gray-400 mt-2"></div>
+    </div>
+  </div>
+
+  <div class="mt-3 bg-gray-800 rounded-lg p-3 text-xs text-gray-400">
+    <strong class="text-white">構文:</strong>
+    連接 <code class="text-green-300">ab</code>、
+    選択 <code class="text-green-300">a|b</code>、
+    閉包 <code class="text-green-300">a*</code>、
+    1回以上 <code class="text-green-300">a+</code>、
+    0/1回 <code class="text-green-300">a?</code>、
+    グループ <code class="text-green-300">(ab)</code>。
+    文字: a-z, 0-9
+  </div>
+</div>
+
+<script>
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+(function() {
+  const EPS = 'ε';
+  let stateId = 0;
+  function newState() { return stateId++; }
+
+  function buildNFA(regex) {
+    stateId = 0;
+    const tokens = tokenizeRegex(regex);
+    const parser = new RegexParser(tokens);
+    return parser.parse();
+  }
+
+  function tokenizeRegex(src) {
+    const toks = [];
+    for (let i = 0; i < src.length; i++) {
+      const c = src[i];
+      if ('|*+?()'.includes(c)) toks.push({ t: c });
+      else if (/[a-zA-Z0-9]/.test(c)) toks.push({ t: 'CHAR', v: c });
+    }
+    return toks;
+  }
+
+  class RegexParser {
+    constructor(tokens) { this.tokens = tokens; this.pos = 0; }
+    peek() { return this.tokens[this.pos] || { t: 'EOF' }; }
+    consume() { return this.tokens[this.pos++] || { t: 'EOF' }; }
+
+    parse() { return this.parseAlt(); }
+
+    parseAlt() {
+      let nfa = this.parseConcat();
+      while (this.peek().t === '|') {
+        this.consume();
+        const right = this.parseConcat();
+        nfa = this.makeUnion(nfa, right);
+      }
+      return nfa;
+    }
+
+    parseConcat() {
+      let nfa = this.parseStar();
+      while (true) {
+        const t = this.peek().t;
+        if (t === 'EOF' || t === '|' || t === ')') break;
+        const right = this.parseStar();
+        nfa = this.makeConcat(nfa, right);
+      }
+      return nfa;
+    }
+
+    parseStar() {
+      let nfa = this.parseAtom();
+      while (true) {
+        const t = this.peek().t;
+        if (t === '*') { this.consume(); nfa = this.makeStar(nfa); }
+        else if (t === '+') { this.consume(); nfa = this.makePlus(nfa); }
+        else if (t === '?') { this.consume(); nfa = this.makeOption(nfa); }
+        else break;
+      }
+      return nfa;
+    }
+
+    parseAtom() {
+      const tok = this.peek();
+      if (tok.t === '(') {
+        this.consume();
+        const nfa = this.parseAlt();
+        this.consume();
+        return nfa;
+      }
+      if (tok.t === 'CHAR') {
+        this.consume();
+        return this.makeChar(tok.v);
+      }
+      const s = newState(); const e = newState();
+      return { start: s, accept: e, transitions: [[s, EPS, e]] };
+    }
+
+    makeChar(c) {
+      const s = newState(), e = newState();
+      return { start: s, accept: e, transitions: [[s, c, e]] };
+    }
+
+    makeConcat(a, b) {
+      const trans = [...a.transitions, ...b.transitions, [a.accept, EPS, b.start]];
+      return { start: a.start, accept: b.accept, transitions: trans };
+    }
+
+    makeUnion(a, b) {
+      const s = newState(), e = newState();
+      const trans = [...a.transitions, ...b.transitions,
+        [s, EPS, a.start], [s, EPS, b.start],
+        [a.accept, EPS, e], [b.accept, EPS, e]];
+      return { start: s, accept: e, transitions: trans };
+    }
+
+    makeStar(a) {
+      const s = newState(), e = newState();
+      const trans = [...a.transitions,
+        [s, EPS, a.start], [s, EPS, e],
+        [a.accept, EPS, a.start], [a.accept, EPS, e]];
+      return { start: s, accept: e, transitions: trans };
+    }
+
+    makePlus(a) {
+      const s = newState(), e = newState();
+      const trans = [...a.transitions,
+        [s, EPS, a.start],
+        [a.accept, EPS, a.start], [a.accept, EPS, e]];
+      return { start: s, accept: e, transitions: trans };
+    }
+
+    makeOption(a) {
+      const s = newState(), e = newState();
+      const trans = [...a.transitions,
+        [s, EPS, a.start], [s, EPS, e], [a.accept, EPS, e]];
+      return { start: s, accept: e, transitions: trans };
+    }
+  }
+
+  function epsClosure(states, transMap) {
+    const closure = new Set(states);
+    const stack = [...states];
+    while (stack.length) {
+      const s = stack.pop();
+      const eps = (transMap.get(s) || new Map()).get(EPS) || [];
+      eps.forEach(t => { if (!closure.has(t)) { closure.add(t); stack.push(t); } });
+    }
+    return closure;
+  }
+
+  function nfaToDFA(nfa) {
+    const transMap = new Map();
+    nfa.transitions.forEach(([s, c, t]) => {
+      if (!transMap.has(s)) transMap.set(s, new Map());
+      if (!transMap.get(s).has(c)) transMap.get(s).set(c, []);
+      transMap.get(s).get(c).push(t);
+    });
+
+    const alphabet = new Set();
+    nfa.transitions.forEach(([,c]) => { if (c !== EPS) alphabet.add(c); });
+
+    const startSet = epsClosure([nfa.start], transMap);
+    const startKey = [...startSet].sort().join(',');
+    const dfaStates = new Map([[startKey, { id: 0, nfaStates: startSet }]]);
+    const dfaTrans = [];
+    const queue = [startKey];
+    let dfaStateId = 1;
+
+    while (queue.length) {
+      const key = queue.shift();
+      const { nfaStates } = dfaStates.get(key);
+      for (const c of alphabet) {
+        const nextNFA = new Set();
+        nfaStates.forEach(s => {
+          const tos = (transMap.get(s) || new Map()).get(c) || [];
+          tos.forEach(t => nextNFA.add(t));
+        });
+        const closed = epsClosure([...nextNFA], transMap);
+        if (closed.size === 0) continue;
+        const nextKey = [...closed].sort().join(',');
+        if (!dfaStates.has(nextKey)) {
+          dfaStates.set(nextKey, { id: dfaStateId++, nfaStates: closed });
+          queue.push(nextKey);
+        }
+        dfaTrans.push({ from: dfaStates.get(key).id, label: c, to: dfaStates.get(nextKey).id });
+      }
+    }
+
+    const dfaAccept = new Set();
+    for (const [, { id, nfaStates }] of dfaStates) {
+      if (nfaStates.has(nfa.accept)) dfaAccept.add(id);
+    }
+
+    return { states: dfaStates.size, startState: 0, acceptStates: dfaAccept, transitions: dfaTrans };
+  }
+
+  function simulateDFA(dfa, input, dfaTrans) {
+    const transMap = new Map();
+    dfaTrans.forEach(({ from, label, to }) => {
+      const key = `${from}:${label}`;
+      transMap.set(key, to);
+    });
+    let state = 0;
+    const path = [state];
+    for (const c of input) {
+      const next = transMap.get(`${state}:${c}`);
+      if (next === undefined) return { accepted: false, path };
+      state = next;
+      path.push(state);
+    }
+    return { accepted: dfa.acceptStates.has(state), path };
+  }
+
+  function layoutStates(count, cx, cy, r) {
+    const positions = [];
+    for (let i = 0; i < count; i++) {
+      const angle = (2 * Math.PI * i / count) - Math.PI / 2;
+      positions.push({ x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) });
+    }
+    return positions;
+  }
+
+  function renderAutomaton(svgEl, states, start, accepts, transitions, activeStates) {
+    const W = svgEl.clientWidth || 380;
+    const H = 290;
+    svgEl.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    const count = states;
+    const cx = W / 2, cy = H / 2;
+    const r = Math.min(W, H) * 0.35;
+    const positions = count <= 1 ? [{ x: cx, y: cy }] : layoutStates(count, cx, cy, r);
+
+    let svg = `<defs>
+      <marker id="arr${svgEl.id}" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+        <path d="M0,0 L8,3 L0,6 Z" fill="#888"/>
+      </marker>
+    </defs>`;
+
+    const transMap = new Map();
+    transitions.forEach(({ from, label, to }) => {
+      const key = `${from}-${to}`;
+      if (!transMap.has(key)) transMap.set(key, { from, to, labels: [] });
+      transMap.get(key).labels.push(label);
+    });
+
+    for (const [, { from, to, labels }] of transMap) {
+      const p1 = positions[from], p2 = positions[to];
+      const label = labels.join(',');
+      if (from === to) {
+        const lx = p1.x, ly = p1.y - 36;
+        svg += `<path d="M ${p1.x-14} ${p1.y-16} C ${p1.x-30} ${p1.y-50} ${p1.x+30} ${p1.y-50} ${p1.x+14} ${p1.y-16}"
+          fill="none" stroke="#888" stroke-width="1.5" marker-end="url(#arr${svgEl.id})"/>`;
+        svg += `<text x="${lx}" y="${ly-8}" text-anchor="middle" fill="#aaa" font-size="11">${label}</text>`;
+        continue;
+      }
+      const dx = p2.x - p1.x, dy = p2.y - p1.y;
+      const len = Math.sqrt(dx*dx+dy*dy) || 1;
+      const nx = -dy/len, ny = dx/len;
+      const bend = 10;
+      const mx = (p1.x+p2.x)/2 + nx*bend, my = (p1.y+p2.y)/2 + ny*bend;
+      const ex = p2.x - dx/len*18, ey = p2.y - dy/len*18;
+      svg += `<path d="M ${p1.x} ${p1.y} Q ${mx} ${my} ${ex} ${ey}"
+        fill="none" stroke="#888" stroke-width="1.5" marker-end="url(#arr${svgEl.id})"/>`;
+      const tx = (p1.x + mx)/2 + nx*8, ty = (p1.y + my)/2 + ny*8;
+      svg += `<text x="${tx}" y="${ty}" text-anchor="middle" fill="#aaa" font-size="11">${label}</text>`;
+    }
+
+    for (let i = 0; i < count; i++) {
+      const { x, y } = positions[i];
+      const isActive = activeStates && activeStates.has(i);
+      const isAccept = accepts.has(i);
+      const isStart = i === start;
+      const fillColor = isActive ? '#f59e0b' : isAccept ? '#1e40af' : '#1f2937';
+      const strokeColor = isAccept ? '#3b82f6' : '#6b7280';
+
+      if (isStart) {
+        svg += `<line x1="${x - 30}" y1="${y}" x2="${x - 18}" y2="${y}" stroke="#6b7280" stroke-width="1.5" marker-end="url(#arr${svgEl.id})"/>`;
+      }
+      if (isAccept) {
+        svg += `<circle cx="${x}" cy="${y}" r="20" fill="none" stroke="${strokeColor}" stroke-width="1.5" stroke-dasharray="3,2"/>`;
+      }
+      svg += `<circle cx="${x}" cy="${y}" r="16" fill="${fillColor}" stroke="${strokeColor}" stroke-width="2" class="state-circle"/>`;
+      svg += `<text x="${x}" y="${y+4}" text-anchor="middle" fill="${isActive ? '#000' : '#fff'}" font-size="12" font-weight="bold">${i}</text>`;
+    }
+
+    svgEl.innerHTML = svg;
+  }
+
+  let currentNFA = null, currentDFA = null, currentDFATrans = null;
+
+  function buildAndRender() {
+    const regex = document.getElementById('regexInput').value.trim();
+    if (!regex) return;
+    try {
+      currentNFA = buildNFA(regex);
+      const nfaSvg = document.getElementById('nfaSvg');
+      const nfaStates = stateId;
+      const nfaTrans = currentNFA.transitions.map(([f,l,t]) => ({ from: f, label: l, to: t }));
+      renderAutomaton(nfaSvg, nfaStates, currentNFA.start, new Set([currentNFA.accept]), nfaTrans, null);
+      document.getElementById('nfaInfo').textContent =
+        `状態数: ${nfaStates} / 遷移数: ${nfaTrans.length} / 開始: q${currentNFA.start} / 受理: q${currentNFA.accept}`;
+      document.getElementById('dfaSvg').innerHTML = '<text x="50%" y="50%" text-anchor="middle" fill="#666" font-size="13">「DFA変換」をクリック</text>';
+      document.getElementById('dfaInfo').textContent = '';
+      currentDFA = null;
+    } catch (e) {
+      document.getElementById('nfaInfo').textContent = 'エラー: ' + e.message;
+    }
+  }
+
+  function convertToDFA() {
+    if (!currentNFA) { buildAndRender(); return; }
+    try {
+      currentDFA = nfaToDFA(currentNFA);
+      currentDFATrans = currentDFA.transitions;
+      const dfaSvg = document.getElementById('dfaSvg');
+      renderAutomaton(dfaSvg, currentDFA.states, currentDFA.startState, currentDFA.acceptStates, currentDFATrans, null);
+      document.getElementById('dfaInfo').textContent =
+        `状態数: ${currentDFA.states} / 遷移数: ${currentDFATrans.length} / 受理状態: {${[...currentDFA.acceptStates].join(',')}}`;
+    } catch (e) {
+      document.getElementById('dfaInfo').textContent = 'エラー: ' + e.message;
+    }
+  }
+
+  function testString() {
+    const input = document.getElementById('testInput').value;
+    const resultEl = document.getElementById('testResult');
+    if (!currentDFA) {
+      resultEl.innerHTML = '<span class="text-yellow-400 text-sm">先にDFA変換してください</span>';
+      return;
+    }
+    const { accepted, path } = simulateDFA(currentDFA, input, currentDFATrans);
+    resultEl.innerHTML = accepted
+      ? `<span class="bg-green-800 text-green-200 px-3 py-1 rounded font-semibold text-sm">✓ 受理: "${esc(input)}" (経路: ${path.join('→')})</span>`
+      : `<span class="bg-red-800 text-red-200 px-3 py-1 rounded font-semibold text-sm">✗ 拒否: "${esc(input)}" (経路: ${path.join('→')})</span>`;
+
+    const activeSet = new Set(path);
+    const dfaSvg = document.getElementById('dfaSvg');
+    renderAutomaton(dfaSvg, currentDFA.states, currentDFA.startState, currentDFA.acceptStates, currentDFATrans, activeSet);
+  }
+
+  document.getElementById('btnBuild').addEventListener('click', buildAndRender);
+  document.getElementById('btnDFA').addEventListener('click', convertToDFA);
+  document.getElementById('btnTest').addEventListener('click', testString);
+  document.getElementById('testInput').addEventListener('keydown', e => { if (e.key === 'Enter') testString(); });
+  document.querySelectorAll('.ex-btn').forEach(btn => {
+    btn.addEventListener('click', function() {
+      document.getElementById('regexInput').value = this.dataset.regex;
+      buildAndRender();
+    });
+  });
+
+  buildAndRender();
+})();
+</script>
+</body>
+</html>
